@@ -124,6 +124,27 @@ build-container:
 	apptainer build "$$CONTAINER_NAME" "$$CONTAINER_DEF" && \
 	echo "Container built successfully: $$CONTAINER_NAME"
 
+## Download TranscriptFormer checkpoint(s) (run on a node with internet, e.g. HPC login node)
+## Usage: make download-transcriptformer [VARIANT=tf-sapiens|tf-exemplar|tf-metazoa|all-embeddings] [CHECKPOINT_DIR=models/transcriptformer]
+## Example: make download-transcriptformer VARIANT=tf-sapiens
+TF_VARIANT := $(or $(VARIANT),tf-sapiens)
+TF_CHECKPOINT_DIR := $(or $(CHECKPOINT_DIR),models/transcriptformer)
+.PHONY: download-transcriptformer
+download-transcriptformer:
+	@case "$(TF_VARIANT)" in \
+		tf-sapiens|tf-exemplar|tf-metazoa|all-embeddings) ;; \
+		*) echo "Error: unknown VARIANT=$(TF_VARIANT) (tf-sapiens, tf-exemplar, tf-metazoa, all-embeddings)"; exit 1 ;; \
+	esac
+	@NAME="$(subst -,_,$(TF_VARIANT))"; \
+	if [ -f "$(TF_CHECKPOINT_DIR)/$$NAME/model_weights.pt" ] || [ "$$NAME" = "all_embeddings" -a -d "$(TF_CHECKPOINT_DIR)/$$NAME" ]; then \
+		echo "$(TF_CHECKPOINT_DIR)/$$NAME already exists; skipping."; \
+		exit 0; \
+	fi; \
+	mkdir -p "$(TF_CHECKPOINT_DIR)"; \
+	echo "Downloading $$NAME to $(TF_CHECKPOINT_DIR)/$$NAME ..."; \
+	curl -fL "https://czi-transcriptformer.s3.amazonaws.com/weights/$$NAME.tar.gz" | tar -xz -C "$(TF_CHECKPOINT_DIR)" && \
+	echo "Done: $(TF_CHECKPOINT_DIR)/$$NAME"
+
 ## Run embedding interactively on HPC (requires interactive node via salloc)
 ## Usage: make hpc-embed-interactive MODEL=<model_name> INPUT=<path/to/input.h5ad> OUTPUT=<path/to/output.npy> [MODEL_ARGS="--arg1 value1 --arg2"]
 ## Note: Run this after getting an interactive node with: salloc --gres=gpu:1 ...

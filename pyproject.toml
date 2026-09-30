@@ -54,11 +54,21 @@ scfoundation = [
     "tqdm",
     "requests",
 ]
+transcriptformer = [
+    "transcriptformer==0.6.1",
+]
 
 [project.scripts]
 transcriptomic-fms = "transcriptomic_fms.cli.main:main"
 
 
+
+[tool.uv]
+# transcriptformer pins torch==2.5.1 and numpy==2.2.6, which cannot co-resolve with
+# these extras; uv resolves them as separate forks.
+conflicts = [
+    [{ extra = "transcriptformer" }, { extra = "scconcept" }],
+]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = ["torch", "numpy"]

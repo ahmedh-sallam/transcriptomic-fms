@@ -1,0 +1,91 @@
+Bootstrap: docker
+From: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+
+%files
+    pyproject.toml /transcriptomic-fms/
+    README.md /transcriptomic-fms/
+    transcriptomic_fms /transcriptomic-fms/transcriptomic_fms
+
+%labels
+    Author "Ahmed Sallam"
+    Version "0.1.0"
+    Description "TranscriptFormer Container (Python 3.11 + PyTorch 2.5.1 + CUDA 12.1)"
+
+%post
+    # 1. System Dependency Installation
+    # build-essential is required at runtime: torch.compile / Triton JIT-compile
+    # TranscriptFormer's FlexAttention block masks.
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y \
+        git \
+        build-essential \
+        wget \
+        curl \
+        ca-certificates \
+        pkg-config \
+        tzdata
+    rm -rf /var/lib/apt/lists/*
+
+    # 2. Python 3.11 via uv (transcriptformer requires Python >=3.11; Ubuntu 22.04
+    # ships 3.10). Interpreter and venv live under /opt so they are readable by the
+    # unprivileged user that runs the container.
+    export UV_INSTALL_DIR=/usr/local/bin
+    export UV_PYTHON_INSTALL_DIR=/opt/uv-python
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    uv python install 3.11
+    uv venv /opt/venv --python 3.11
+    export VIRTUAL_ENV=/opt/venv
+    export PATH=/opt/venv/bin:$PATH
+
+    # 3. PyTorch 2.5.1 with CUDA 12.1 (transcriptformer pins torch==2.5.1)
+    uv pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+
+    # 4. TranscriptFormer (pins numpy/anndata/scanpy/lightning) plus project tooling,
+    # resolved together so tooling cannot move the pinned versions.
+    uv pip install \
+        "transcriptformer==0.6.1" \
+        "scikit-learn" \
+        "matplotlib" \
+        "ipython" \
+        "python-dotenv" \
+        "ruff"
+
+    # 5. Install our package (editable, no dependency resolution)
+    cd /transcriptomic-fms
+    uv pip install --no-deps -e .
+
+    # 6. Create standard directories
+    mkdir -p /transcriptomic-fms/data
+    mkdir -p /transcriptomic-fms/output
+    mkdir -p /transcriptomic-fms/models
+    chmod -R a+rX /opt/uv-python /opt/venv /transcriptomic-fms
+
+    # 7. Final Verification
+    echo "=== VERSION CHECK ==="
+    uv pip list | grep -E "^(torch|triton|transcriptformer|numpy|anndata|scanpy|pytorch-lightning) "
+    python -c "import transcriptformer.model.inference, transcriptomic_fms; print('imports ok')"
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export DEBIAN_FRONTEND=noninteractive
+
+    export VIRTUAL_ENV=/opt/venv
+    export PATH=/opt/venv/bin:$PATH
+    export CUDA_HOME=/usr/local/cuda
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
+    export PYTHONPATH="/transcriptomic-fms:$PYTHONPATH"
+    export PYTHONUNBUFFERED=1
+    export PYTHONNOUSERSITE=1
+
+    # The image is read-only; torch.compile / Triton need writable caches.
+    export TRITON_CACHE_DIR="${TMPDIR:-/tmp}/triton-cache-$(id -u)"
+    export TORCHINDUCTOR_CACHE_DIR="${TMPDIR:-/tmp}/torchinductor-cache-$(id -u)"
+    export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-$(id -u)"
+
+    export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+%runscript
+    exec python -m transcriptomic_fms.cli.main "$@"

@@ -48,6 +48,7 @@ transcriptomic-fms-*.sif
 # Data
 data/
 output/
+/models/
 *.h5ad
 *.npy
 

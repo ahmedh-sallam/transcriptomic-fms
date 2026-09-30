@@ -37,8 +37,9 @@ _SYMBOL_COL_CANDIDATES = (
     "name",
 )
 _EMBED_OUTPUT_SUFFIXES = ("_embeddings.h5ad", "_emb.h5ad")
-_ENSEMBL_MODELS = frozenset({"geneformer", "scconcept"})
+_ENSEMBL_MODELS = frozenset({"geneformer", "scconcept", "transcriptformer"})
 _SPECIAL_TOKEN_RE = re.compile(r"^<.*>$")
+_DEFAULT_VOCABS_DIR = Path(__file__).resolve().parents[1] / "models" / "vocabs"
 
 
 class Level(str, Enum):
@@ -152,6 +153,32 @@ def check_raw_counts_in_x(x: sp.spmatrix | np.ndarray) -> list[Finding]:
     return findings
 
 
+def check_zero_count_cells(adata: ad.AnnData, *, max_sample_names: int = 5) -> list[Finding]:
+    """Flag cells with zero total counts in ``adata.X`` (breaks count-based embedders)."""
+    findings: list[Finding] = []
+    x = adata.X
+    if sp.issparse(x):
+        totals = np.asarray(x.sum(axis=1)).ravel()
+    else:
+        totals = np.asarray(x).sum(axis=1).ravel()
+    zero_mask = totals <= 0
+    n_zero = int(zero_mask.sum())
+    n_total = int(totals.shape[0])
+    if n_zero == 0:
+        return findings
+
+    frac = n_zero / n_total if n_total else 0.0
+    sample = adata.obs_names[zero_mask][:max_sample_names].astype(str).tolist()
+    sample_txt = f"; examples: {', '.join(sample)}" if sample else ""
+    findings.append(
+        Finding(
+            Level.ERROR,
+            f"{n_zero}/{n_total} cells have zero total counts ({frac:.1%}){sample_txt}",
+        )
+    )
+    return findings
+
+
 def extract_gene_symbols(adata: ad.AnnData) -> list[str]:
     """Mirror the model adapters' gene-symbol lookup order."""
     column = _first_var_column(adata, _SYMBOL_COL_CANDIDATES)
@@ -215,7 +242,7 @@ def load_bundled_model_gene_lists(
 ) -> dict[str, list[str]]:
     """Load bundled model vocabularies without importing optional model packages."""
     if vocabs_dir is None:
-        vocabs_dir = Path(__file__).resolve().parents[1] / "models" / "vocabs"
+        vocabs_dir = _DEFAULT_VOCABS_DIR
 
     requested = {model.lower() for model in models} if models else None
     loaders = {
@@ -233,6 +260,9 @@ def load_bundled_model_gene_lists(
         .tolist(),
         "geneformer": lambda: _read_pickle_keys(
             vocabs_dir / "geneformer_vocab" / "token_dictionary_gc30M.pkl"
+        ),
+        "transcriptformer": lambda: _read_text_genes(
+            vocabs_dir / "transcriptformer_vocab" / "gene_vocab.txt"
         ),
     }
 
@@ -428,6 +458,52 @@ def check_model_gene_overlap(
     return findings
 
 
+def load_transcriptformer_assay_vocab(vocabs_dir: Path | None = None) -> set[str]:
+    """Load the assay labels TranscriptFormer checkpoints recognize."""
+    vocabs_dir = vocabs_dir or _DEFAULT_VOCABS_DIR
+    path = vocabs_dir / "transcriptformer_vocab" / "assay_vocab.json"
+    return {label for label in json.loads(path.read_text()) if label != "unknown"}
+
+
+def check_transcriptformer_assay(
+    adata: ad.AnnData,
+    *,
+    assay_vocab: set[str] | None = None,
+    assay_column: str = "assay",
+    max_sample_labels: int = 5,
+) -> list[Finding]:
+    """Warn when cells would fall back to TranscriptFormer's 'unknown' assay token."""
+    if assay_vocab is None:
+        assay_vocab = load_transcriptformer_assay_vocab()
+    if assay_column not in adata.obs.columns:
+        return [
+            Finding(
+                Level.WARN,
+                f"transcriptformer: obs['{assay_column}'] missing; all cells will use the "
+                "'unknown' assay token (set it or pass --assay)",
+            )
+        ]
+
+    labels = adata.obs[assay_column].astype(object)
+    unmatched = sorted(
+        {
+            "<missing>" if pd.isna(v) else str(v)
+            for v in labels
+            if pd.isna(v) or str(v) not in assay_vocab
+        }
+    )
+    if not unmatched:
+        return []
+    sample = ", ".join(repr(v) for v in unmatched[:max_sample_labels])
+    return [
+        Finding(
+            Level.WARN,
+            f"transcriptformer: {len(unmatched)} obs['{assay_column}'] label(s) not in the "
+            f"assay vocab and will map to 'unknown': {sample}",
+        )
+    ]
+
+
 def validate_h5ad_file(
     path: Path,
     *,
@@ -447,6 +523,8 @@ def validate_h5ad_file(
     for finding in check_structure(adata):
         _add(report, finding.level, finding.message)
     for finding in check_raw_counts_in_x(adata.X):
+        _add(report, finding.level, finding.message)
+    for finding in check_zero_count_cells(adata):
         _add(report, finding.level, finding.message)
     for finding in check_gene_metadata(
         adata,
@@ -474,6 +552,9 @@ def validate_h5ad_file(
             min_ensembl_overlap=min_ensembl_overlap,
         ):
             _add(report, finding.level, finding.message)
+        if "transcriptformer" in {model.lower() for model in model_gene_lists}:
+            for finding in check_transcriptformer_assay(adata):
+                _add(report, finding.level, finding.message)
 
     if not report.findings:
         _add(report, Level.OK, "All checks passed")

@@ -33,7 +33,9 @@ make pre-embedding-check INPUT=data/test.h5ad
 ```
 
 By default this checks all bundled vocabularies under `transcriptomic_fms/models/vocabs`, including
-Geneformer's GC30M token dictionary.
+Geneformer's GC30M token dictionary and TranscriptFormer's human gene vocabulary. For TranscriptFormer
+it also warns when `obs['assay']` is missing or contains labels outside the checkpoint's assay vocabulary
+(those cells fall back to the `unknown` assay token).
 
 ### Generate Embeddings
 
@@ -84,7 +86,7 @@ make sensitivity-analysis MODEL=geneformer INPUT=data/test.h5ad OUTPUT=output/se
 
 On HPC (after building the model container), use `make hpc-sensitivity-analysis-interactive` (interactive node) or `make hpc-sensitivity-analysis` (SLURM batch) with the same `MODEL`, `INPUT`, `OUTPUT`, and optional `CHUNK_SIZE`, `N_CELLS`, `MODEL_ARGS`.
 
-**Supported models:** Geneformer, scFoundation (cell embedding only), SCimilarity, scGPT. scConcept is not yet implemented and will report a clear error.
+**Supported models:** Geneformer, scFoundation (cell embedding only), SCimilarity, scGPT. scConcept and TranscriptFormer are not yet implemented and will report a clear error.
 
 **Output layout (per chunk or single file):** AnnData with `obs` pass-through from input plus `seq_length`, `obsm['X_baseline']` (n_cells, d_emb) cell embeddings, `obsm['jacobian_U']` (n_cells, d_emb, 50) float16 left singular vectors of the Jacobian, and `obsm['jacobian_S']` (n_cells, 50) float32 singular values. The full Jacobian is never stored; it is computed per cell, reshaped to (d_emb, seq_len*d_token), truncated SVD (top 50) is taken, then the Jacobian is discarded. Use `--chunk-size` to process in chunks and manage memory.
 
@@ -303,6 +305,80 @@ make hpc-embed MODEL=scfoundation \
     MODEL_ARGS="--device cuda --model-path models/scfoundation/models/models.ckpt"
 ```
 
+### TranscriptFormer
+
+TranscriptFormer: generative cross-species single-cell foundation model from CZI ([GitHub](https://github.com/czi-ai/transcriptformer), [Science](https://www.science.org/doi/10.1126/science.aec8514)). Produces 2048-dimensional mean-pooled cell embeddings.
+
+**Checkpoints** (public S3, extracted to `models/transcriptformer/<variant>/`):
+
+| Variant | Training data | Download |
+|---------|---------------|----------|
+| `tf-sapiens` (default) | 57M human cells | 1.8 GB |
+| `tf-exemplar` | human + mouse, zebrafish, fly, C. elegans | 4.1 GB |
+| `tf-metazoa` | 12 species | 6.3 GB |
+| `all-embeddings` | ESM-2 gene embeddings for out-of-distribution species | 4.8 GB |
+
+```bash
+# Download on a node with internet access (HPC compute nodes usually have none)
+make download-transcriptformer VARIANT=tf-sapiens
+```
+
+If the checkpoint is missing at run time it is downloaded automatically unless `--no-auto-download` is passed.
+
+**Installation (local, optional):**
+```bash
+make install-model MODEL=transcriptformer
+```
+TranscriptFormer pins `torch==2.5.1` and `numpy==2.2.6`, so this extra cannot be installed together with `scconcept`; the container is the recommended way to run it.
+
+**Arguments:**
+- `--variant <str>`: `tf-sapiens`, `tf-exemplar` or `tf-metazoa` (default: `tf-sapiens`)
+- `--checkpoint-dir <path>`: Directory containing extracted checkpoints (default: `models/transcriptformer`)
+- `--checkpoint-path <path>`: Explicit checkpoint directory (overrides `--variant` / `--checkpoint-dir`)
+- `--no-auto-download`: Fail instead of downloading a missing checkpoint
+- `--batch-size <int>`: Inference batch size (default: 8; use 1-4 on 16 GB GPUs)
+- `--device <str>`: `cuda` or `cpu` (auto-detects if not specified)
+- `--precision <str>`: `16-mixed` or `32` (default: `16-mixed` on CUDA, `32` on CPU)
+- `--assay <str>`: Assay label applied to all cells (e.g. `"10x 3' v3"`)
+- `--assay-column <str>`: `obs` column holding assay labels (default: `assay`)
+- `--clip-counts <int>`: Per-gene count clip (default: 30, as in training)
+- `--normalize-to-scale <float>`: Scale total counts per cell before clipping (default: 0, disabled)
+- `--pretrained-embedding <path>`: Comma-separated ESM-2 gene embedding `.h5` file(s) for species outside the checkpoint's training set (from `all-embeddings`)
+- `--remove-duplicate-genes`: Keep the first of duplicated Ensembl IDs instead of failing
+- `--disable-compile-block-mask`: Disable FlexAttention block-mask compilation (always disabled on CPU)
+
+**Examples:**
+```bash
+# Default human checkpoint
+make embed MODEL=transcriptformer INPUT=data/test.h5ad OUTPUT=output/embeddings.h5ad
+
+# Large dataset: TranscriptFormer densifies its input, so process in chunks
+make embed MODEL=transcriptformer INPUT=data/test.h5ad OUTPUT=output/embeddings.h5ad \
+    MODEL_ARGS="--chunk-size 20000 --batch-size 16 --variant tf-metazoa"
+
+# Mouse cells with the human-only checkpoint (out-of-distribution species)
+make embed MODEL=transcriptformer INPUT=data/mouse.h5ad OUTPUT=output/embeddings.h5ad \
+    MODEL_ARGS="--pretrained-embedding models/transcriptformer/all_embeddings/mus_musculus_gene.h5"
+```
+
+**HPC container:**
+```bash
+module load apptainer
+make build-container MODEL=transcriptformer
+make download-transcriptformer VARIANT=tf-sapiens
+
+make hpc-embed-interactive MODEL=transcriptformer \
+    INPUT=data/test.h5ad \
+    OUTPUT=output/embeddings.h5ad \
+    MODEL_ARGS="--device cuda"
+```
+
+**Notes:**
+- Input must be raw counts in `adata.X` (`adata.raw` is ignored) with Ensembl IDs in `var['ensembl_id']` (or `var['gene_id']` / `var.index`); version suffixes are stripped and genes outside the vocabulary are dropped.
+- Checkpoints condition on an assay token read from `obs['assay']` using CELLxGENE assay labels (e.g. `10x 3' v3`, `Smart-seq2`). Missing or unrecognized labels map to `unknown`.
+- Up to 2047 expressed genes per cell are used (non-zero genes in `var` order).
+- Inference runs on a single GPU; A100 40 GB recommended. The container sets writable Triton / TorchInductor cache directories because block masks are JIT-compiled.
+
 ## HPC Deployment
 
 ### Building Containers
@@ -314,6 +390,7 @@ make build-container MODEL=scimilarity
 make build-container MODEL=geneformer
 make build-container MODEL=scfoundation
 make build-container MODEL=scconcept
+make build-container MODEL=transcriptformer
 ```
 
 ### Container Updates
@@ -339,6 +416,7 @@ sbatch --time=8:00:00 --mem=128G transcriptomic_fms/hpc/run_job.sh sensitivity-a
 All models require AnnData objects (`.h5ad` files) with gene identifiers:
 - **Most models**: Gene symbols in `var['gene_symbol']` (preferred, singular), `var['gene_symbols']` (plural), `var.index`, `var['feature_name']`, or `var['gene_name']`
 - **Geneformer**: Requires Ensembl IDs in `var.index` or `var['ensembl_id']` column
+- **TranscriptFormer**: Requires raw counts in `X`, Ensembl IDs in `var['ensembl_id']` (or `var['gene_id']` / `var.index`), and ideally CELLxGENE assay labels in `obs['assay']`
 
 ## Architecture
 
