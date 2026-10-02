@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=transcriptomic-fms
-#SBATCH --time=4:00:00
+#SBATCH --time=6:00:00
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --account=def-jagillis
 #SBATCH --output=run_logs/%x_%j.out
 #SBATCH --error=run_logs/%x_%j.err
-#SBATCH --gres=gpu:h100:1
+#SBATCH --gres=gpu:nvidia_h100_80gb_hbm3_2g.20gb:1
 
 # Load required modules
 # Temporarily suspend strict error handling to prevent exit on profile warnings
