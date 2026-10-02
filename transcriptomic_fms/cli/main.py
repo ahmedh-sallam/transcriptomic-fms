@@ -231,7 +231,9 @@ def embed_command(args: argparse.Namespace, model_args: dict[str, Any]) -> None:
         n_obs = adata_backed.n_obs
         logger.info(f"Loaded: {adata_backed.shape}. Processing in chunks of {args.chunk_size}...")
 
-        temp_dir = output_dir / f"tmp_chunking_{base_name}"
+        # Keyed on the model-prefixed name so concurrent jobs for different models on the
+        # same input do not share (and delete) each other's chunk directory.
+        temp_dir = output_dir / f"tmp_chunking_{output_path.stem}"
         temp_dir.mkdir(parents=True, exist_ok=True)
         chunk_files = []
 
